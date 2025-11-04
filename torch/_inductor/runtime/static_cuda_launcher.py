@@ -282,7 +282,7 @@ class StaticallyLaunchedCudaKernel:
                 if has_scratch:
                     arg_tys = arg_tys + "O"
                     args = (*args, None)
-        
+        # pyrefly: ignore [bad-argument-type]
         assert len(args) == len(arg_tys)
 
         # TODO: can handle grid functions here or in C++, so
