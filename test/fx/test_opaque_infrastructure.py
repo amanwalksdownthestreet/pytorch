@@ -4,6 +4,7 @@ import torch
 from torch._functorch._aot_autograd.descriptors import (
     PlainAOTInput,
     SubclassGetAttrAOTInput,
+    SubclassMethodAOTInput,
 )
 from torch._functorch._aot_autograd.runtime_wrappers import (
     _evaluate_opaque_descriptor,
@@ -85,6 +86,57 @@ class TestOpaqueInfrastructure(TestCase):
         # Verify we got the correct counter object
         self.assertIs(result, counter)
         self.assertEqual(result.get_value(), 42)
+
+        # Test SubclassMethodAOTInput descriptor (method call)
+        # Create a wrapper with a method
+        class WrapperWithMethod:
+            def __init__(self):
+                self.counter = OpaqueCounter(100)
+
+            def get_counter(self):
+                return self.counter
+
+        wrapper_with_method = WrapperWithMethod()
+
+        # This represents: args[0].get_counter()
+        plain_desc2 = PlainAOTInput(idx=0)
+        method_desc = SubclassMethodAOTInput(
+            plain_desc2, "get_counter", args=(), kwargs={}
+        )
+
+        args2 = [wrapper_with_method]
+        result2 = _evaluate_opaque_descriptor(method_desc, args2)
+
+        # Verify we got the counter from the method call
+        self.assertIs(result2, wrapper_with_method.counter)
+        self.assertEqual(result2.get_value(), 100)
+
+        # Test chained descriptor: args[0].counter.get_value()
+        # But get_value returns int, so let's test a realistic chain like DTensor
+        # args[0].device_mesh.get_group(0)
+        class FakeDeviceMesh:
+            def get_group(self, dim):
+                return OpaqueCounter(200 + dim)
+
+        class FakeDTensor:
+            def __init__(self):
+                self.device_mesh = FakeDeviceMesh()
+
+        dtensor = FakeDTensor()
+
+        # Build: args[0].device_mesh.get_group(1)
+        plain_desc3 = PlainAOTInput(idx=0)
+        mesh_desc = SubclassGetAttrAOTInput(plain_desc3, "device_mesh")
+        group_desc = SubclassMethodAOTInput(
+            mesh_desc, "get_group", args=(1,), kwargs={}
+        )
+
+        args3 = [dtensor]
+        result3 = _evaluate_opaque_descriptor(group_desc, args3)
+
+        # Verify we got the process group
+        self.assertIsInstance(result3, OpaqueCounter)
+        self.assertEqual(result3.get_value(), 201)  # 200 + dim(1)
 
     def test_nested_subclass_descriptors(self):
         """Test deeply nested descriptor evaluation."""
