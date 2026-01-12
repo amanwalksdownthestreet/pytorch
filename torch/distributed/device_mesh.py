@@ -432,7 +432,7 @@ else:
             rank_map: torch.Tensor,
             dim_name: str,
             backend_override: BackendConfig,
-        ) -> GroupName | None:
+        ) -> GroupName:
             # Generate a 2D global mesh tensor for the current dim for PG creation.
             pg_ranks_by_dim = sub_layout.nest().remap_to_tensor(rank_map)
             backend, pg_options = backend_override
@@ -501,6 +501,17 @@ else:
             # Otherwise, we use `new_group` instead of `split_group` to create subgroups by looping over `pg_ranks_by_dim`
             # along with appending information to the `dim_group_names` list whenever necessary.
             pg_name = None
+            found_my_rank = False
+
+            # We want a consistent naming scheme across ranks so the output
+            # graphs are the same on each rank. To do this we'll always report
+            # the name of the first created group and if that's not our rank's
+            # name then we'll add an alias.
+            #
+            # Couldn't we just tell c10d to use the same name on every rank? In
+            # theory yes, but for consistency we want to create ALL groups (even
+            # ones that don't contain our rank) and there's checks to ensure
+            # that we don't duplicate names.
             for dim_mesh in pg_ranks_by_dim:
                 subgroup_ranks = dim_mesh.tolist()
                 dim_group = new_group(
@@ -509,16 +520,26 @@ else:
                     backend=backend,
                     pg_options=pg_options,
                     group_desc=group_desc,
+                    always_return_group_name=True,
                 )
+                if pg_name is None:
+                    pg_name = "group_" + dim_group.group_name
 
                 # only add to dim_groups if the current rank in the subgroup
                 if get_rank() in subgroup_ranks:
-                    if pg_name is not None:
+                    if found_my_rank:
                         raise RuntimeError(
                             f"Each device mesh dimension should get only one process group, but got {get_rank()} "
                             f"in {subgroup_ranks}!"
                         )
-                    pg_name = dim_group.group_name
+                    found_my_rank = True
+                    if pg_name != dim_group.group_name:
+                        torch._C._distributed_c10d._register_process_group_alias(
+                            pg_name, dim_group.group_name
+                        )
+
+            if not pg_name:
+                raise RuntimeError(f"Rank {get_rank()} not present in DeviceMesh")
             return pg_name
 
         @staticmethod
@@ -1016,7 +1037,7 @@ else:
                     mesh_dim_names=mesh_dim_names,
                     _init_backend=False,
                 )
-                device_mesh._dim_group_names = [group.group_name]
+                device_mesh._dim_group_names = [group.group_name_or_alias]
                 return device_mesh
 
             # nD scenario
@@ -1046,7 +1067,9 @@ else:
             device_mesh = DeviceMesh(
                 device_type, mesh, mesh_dim_names=mesh_dim_names, _init_backend=False
             )
-            device_mesh._dim_group_names = [group.group_name for group in groups]
+            device_mesh._dim_group_names = [
+                group.group_name_or_alias for group in groups
+            ]
             return device_mesh
 
         def size(self, mesh_dim: int | None = None) -> int:
@@ -1123,7 +1146,27 @@ else:
             Return the relative indices of this rank relative to all
             dimensions of the mesh. If this rank is not part of the mesh, return None.
             """
-            return self._coordinate_on_dim if self._coordinate_on_dim else None
+            return self._coordinate_on_dim
+
+        def _sym_get_coordinate(self, index: int) -> int:
+            if not _in_fake_mode():
+                # This is only valid when the current rank is part of the mesh.
+                assert self._coordinate_on_dim is not None
+                return self._coordinate_on_dim[index]
+
+            # This will cause the ops to be registered
+            from ._ops import device_mesh  # noqa: F401
+
+            # Temporarily turn off tracing while we lift the constant
+            # rank_map to a list so it can be a constant in the graph.
+            with torch._subclasses.fake_tensor.unset_fake_temporarily():
+                rank_map_list = self._rank_map.tolist()
+            rank_map = torch.tensor(rank_map_list, device="cpu", dtype=torch.int)
+            full_mesh = self._layout.remap_to_tensor(rank_map)
+
+            return torch.ops.device_mesh._runtime_compute_coordinate_on_dim(
+                full_mesh, index
+            )
 
         def _sym_get_coordinate(self, index: int) -> int:
             # This is only valid when the current rank is part of the mesh.
@@ -1441,3 +1484,9 @@ else:
         )
 
         return device_mesh
+
+
+def _in_fake_mode() -> bool:
+    if context := torch._guards.TracingContext.try_get():
+        return context.fake_mode is not None
+    return False
