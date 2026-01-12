@@ -103,8 +103,8 @@ void CUDAAllocatorConfig::parseArgs(const std::string& env) {
     } else if (key == "pinned_reserve_segment_size_mb") {
       i = parsePinnedReserveSegmentSize(tokenizer, i);
       used_native_specific_option = true;
-    } else if (key == "pinned_max_power2_size_mb") {
-      i = parsePinnedMaxPower2Size(tokenizer, i);
+    } else if (key == "pinned_max_cachesize_mb") {
+      i = parsePinnedMaxCachesize(tokenizer, i);
       used_native_specific_option = true;
     } else if (key == "graph_capture_record_stream_reuse") {
       i = parseGraphCaptureRecordStreamReuse(tokenizer, i);
@@ -195,15 +195,20 @@ size_t CUDAAllocatorConfig::parsePinnedReserveSegmentSize(
   return i;
 }
 
-size_t CUDAAllocatorConfig::parsePinnedMaxPower2Size(
+size_t CUDAAllocatorConfig::parsePinnedMaxCachesize(
     const c10::CachingAllocator::ConfigTokenizer& tokenizer,
     size_t i) {
   tokenizer.checkToken(++i, ":");
-  size_t val = tokenizer.toSizeT(++i);
-  // 0 means disabled (all allocations use power-of-two behavior)
-  // Any positive value sets the threshold in MB above which allocations
-  // will not be rounded to power-of-two and will not be cached
-  m_pinned_max_power2_size_mb = val;
+  // Parse as signed integer to allow -1 as sentinel
+  int64_t val = std::stoll(tokenizer[++i]);
+  TORCH_CHECK_VALUE(
+      val >= -1,
+      "pinned_max_cachesize_mb must be -1 (disabled) or >= 0, got ",
+      val);
+  // -1 means disabled (all allocations use power-of-two and caching).
+  // 0 means no caching (all allocations use exact size).
+  // Positive values set the threshold in MB.
+  m_pinned_max_cachesize_mb = val;
   return i;
 }
 

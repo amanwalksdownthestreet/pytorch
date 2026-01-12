@@ -6,6 +6,7 @@
 
 #include <cuda_runtime_api.h>
 #include <future>
+#include <limits>
 
 namespace at::cuda {
 namespace {
@@ -304,14 +305,18 @@ struct CUDACachingHostAllocatorImpl
   }
 
   /**
-   * Returns the maximum allocation size (in bytes) that will use power-of-two
-   * behavior (rounding up and caching). Configured via PYTORCH_CUDA_ALLOC_CONF
-   * with pinned_max_power2_size_mb option.
+   * Returns the maximum allocation size (in bytes) that will be cached.
+   * Configured via PYTORCH_CUDA_ALLOC_CONF with pinned_max_cachesize_mb option.
+   * Returns SIZE_MAX if disabled (-1), meaning all allocations are cached.
    * See https://github.com/pytorch/pytorch/issues/150517
    */
-  size_t pinned_max_power2_size() override {
-    size_t size_mb = c10::cuda::CUDACachingAllocator::CUDAAllocatorConfig::pinned_max_power2_size_mb();
-    return size_mb * 1024 * 1024;  // Convert MB to bytes
+  size_t pinned_max_cachesize() override {
+    int64_t size_mb = c10::cuda::CUDACachingAllocator::CUDAAllocatorConfig::pinned_max_cachesize_mb();
+    // -1 means disabled (all allocations use power-of-two and caching)
+    if (size_mb < 0) {
+      return std::numeric_limits<size_t>::max();
+    }
+    return static_cast<size_t>(size_mb) * 1024 * 1024;  // Convert MB to bytes
   }
 };
 

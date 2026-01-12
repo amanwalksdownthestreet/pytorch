@@ -613,6 +613,14 @@ Available options:
   segment. This allocates a large segment of pinned memory upfront and then uses to allocate
   small size requests. This helps reduce the number of expensive device library calls.
 
+* `pinned_max_cachesize_mb` option controls the maximum allocation size (in MB) that will
+  be cached for reuse. Allocations at or below this threshold use power-of-two rounding
+  and are cached in the free list. Allocations larger than this will use their exact size
+  and will not be cached (freed immediately), avoiding memory waste for large allocations
+  slightly above a power-of-two boundary. Default is `-1` (disabled), meaning all
+  allocations use power-of-two rounding and caching. Set to `0` to disable caching entirely.
+  See https://github.com/pytorch/pytorch/issues/150517 for more details.
+
 * ``graph_capture_record_stream_reuse`` (experimental, default: `False`)
   If set to `True`, the CUDA caching allocator will attempt to reclaim device memory during
   CUDA Graph capture by using the graph topology (instead of CUDA events) to determine

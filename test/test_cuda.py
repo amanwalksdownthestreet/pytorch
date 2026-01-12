@@ -271,16 +271,16 @@ class TestCuda(TestCase):
         expected = empty_stats()
 
     @serialTest()
-    def test_pinned_memory_max_power2_size_config(self):
+    def test_pinned_memory_max_cachesize_config(self):
         """
-        Test pinned_max_power2_size_mb config option.
+        Test pinned_max_cachesize_mb config option.
 
-        Verifies that when pinned_max_power2_size_mb is configured, pinned memory
+        Verifies that when pinned_max_cachesize_mb is configured, pinned memory
         allocations above that threshold are not rounded up to the next power
         of two and are not cached, avoiding memory waste.
 
         Without the config, a 129MB tensor results in 256MB allocation due to
-        power-of-two rounding. With pinned_max_power2_size_mb set, the
+        power-of-two rounding. With pinned_max_cachesize_mb set, the
         allocation should be close to the requested size.
 
         See https://github.com/pytorch/pytorch/issues/150517
@@ -302,7 +302,7 @@ class TestCuda(TestCase):
 
         # Enable the fix: allocations > 64MB will not be rounded to power-of-two
         # and will not be cached for reuse
-        with pinned_memory_max_power2_size(64):
+        with pinned_memory_max_cachesize(64):
             t = torch.empty(num_elements, dtype=torch.float16, pin_memory=True)
             self.assertTrue(t.is_pinned())
 
@@ -310,7 +310,7 @@ class TestCuda(TestCase):
             stats = torch.cuda.host_memory_stats()
             allocated_bytes = stats["allocated_bytes.current"]
 
-            # With pinned_max_power2_size_mb set, the allocation should NOT be
+            # With pinned_max_cachesize_mb set, the allocation should NOT be
             # rounded up to 256MB. We allow some overhead (up to 50%) but NOT 2x.
             max_acceptable_overhead = 1.5
             max_acceptable_bytes = int(requested_bytes * max_acceptable_overhead)
@@ -328,11 +328,11 @@ class TestCuda(TestCase):
             del t
 
     @serialTest()
-    def test_pinned_memory_max_power2_size_no_caching(self):
+    def test_pinned_memory_max_cachesize_no_caching(self):
         """
         Test that allocations above threshold are NOT cached.
 
-        When pinned_max_power2_size_mb is set, allocations above the threshold
+        When pinned_max_cachesize_mb is set, allocations above the threshold
         should be freed immediately and not reused. This prevents the bug where
         a smaller uncached block could be returned for a larger request.
 
@@ -343,7 +343,7 @@ class TestCuda(TestCase):
         torch.cuda.reset_accumulated_host_memory_stats()
         torch.cuda.reset_peak_host_memory_stats()
 
-        with pinned_memory_max_power2_size(64):
+        with pinned_memory_max_cachesize(64):
             # Allocate 129MB (above 64MB threshold, won't be cached)
             mb_129 = 129 * 1024 * 1024
             num_elements_129 = mb_129 // 2
@@ -369,11 +369,11 @@ class TestCuda(TestCase):
             )
 
     @serialTest()
-    def test_pinned_memory_max_power2_size_below_threshold_cached(self):
+    def test_pinned_memory_max_cachesize_below_threshold_cached(self):
         """
         Test that allocations AT or BELOW the threshold ARE cached normally.
 
-        Allocations <= pinned_max_power2_size_mb should use power-of-two rounding
+        Allocations <= pinned_max_cachesize_mb should use power-of-two rounding
         and be cached for reuse.
 
         See https://github.com/pytorch/pytorch/issues/150517
@@ -384,7 +384,7 @@ class TestCuda(TestCase):
         torch.cuda.reset_peak_host_memory_stats()
 
         # Set threshold to 64MB
-        with pinned_memory_max_power2_size(64):
+        with pinned_memory_max_cachesize(64):
             # Allocate 32MB (below 64MB threshold, should be rounded to 32MB and cached)
             mb_32 = 32 * 1024 * 1024
             num_elements_32 = mb_32 // 2
@@ -427,11 +427,11 @@ class TestCuda(TestCase):
             del t2
 
     @serialTest()
-    def test_pinned_memory_max_power2_size_exact_threshold(self):
+    def test_pinned_memory_max_cachesize_exact_threshold(self):
         """
         Test allocation at exactly the threshold boundary.
 
-        An allocation of exactly pinned_max_power2_size_mb should still use
+        An allocation of exactly pinned_max_cachesize_mb should still use
         power-of-two behavior (it's <= threshold, not < threshold).
 
         See https://github.com/pytorch/pytorch/issues/150517
@@ -442,7 +442,7 @@ class TestCuda(TestCase):
         torch.cuda.reset_peak_host_memory_stats()
 
         # Set threshold to 64MB and allocate exactly 64MB
-        with pinned_memory_max_power2_size(64):
+        with pinned_memory_max_cachesize(64):
             mb_64 = 64 * 1024 * 1024
             num_elements_64 = mb_64 // 2
             t1 = torch.empty(num_elements_64, dtype=torch.float16, pin_memory=True)
@@ -468,7 +468,7 @@ class TestCuda(TestCase):
             )
 
     @serialTest()
-    def test_pinned_memory_max_power2_size_multiple_large_allocs(self):
+    def test_pinned_memory_max_cachesize_multiple_large_allocs(self):
         """
         Test multiple large allocations don't incorrectly reuse blocks.
 
@@ -485,7 +485,7 @@ class TestCuda(TestCase):
         torch.cuda.reset_accumulated_host_memory_stats()
         torch.cuda.reset_peak_host_memory_stats()
 
-        with pinned_memory_max_power2_size(64):
+        with pinned_memory_max_cachesize(64):
             # Allocate 129MB
             mb_129 = 129 * 1024 * 1024
             num_elements_129 = mb_129 // 2
@@ -525,7 +525,7 @@ class TestCuda(TestCase):
             del t2
 
     @serialTest()
-    def test_pinned_memory_max_power2_size_mixed_sizes(self):
+    def test_pinned_memory_max_cachesize_mixed_sizes(self):
         """
         Test mixed allocation sizes with threshold.
 
@@ -539,7 +539,7 @@ class TestCuda(TestCase):
         torch.cuda.reset_accumulated_host_memory_stats()
         torch.cuda.reset_peak_host_memory_stats()
 
-        with pinned_memory_max_power2_size(64):
+        with pinned_memory_max_cachesize(64):
             # Small allocation (32MB, below threshold)
             mb_32 = 32 * 1024 * 1024
             num_elements_32 = mb_32 // 2
@@ -5805,9 +5805,9 @@ def caching_host_allocator_use_background_threads(use_background_threads: bool):
 
 
 @contextlib.contextmanager
-def pinned_memory_max_power2_size(size_mb: int):
+def pinned_memory_max_cachesize(size_mb: int):
     """
-    Context manager to set pinned_max_power2_size_mb for pinned memory allocations.
+    Context manager to set pinned_max_cachesize_mb for pinned memory allocations.
 
     When set, allocations larger than size_mb will not be rounded up to the next
     power of two and will not be cached, avoiding memory waste for large allocations.
@@ -5816,13 +5816,13 @@ def pinned_memory_max_power2_size(size_mb: int):
     """
     # Save current value to restore later
     snapshot = torch.cuda.memory._snapshot()
-    cur_value = snapshot["allocator_settings"].get("pinned_max_power2_size_mb", 0)
-    torch._C._accelerator_setAllocatorSettings(f"pinned_max_power2_size_mb:{size_mb}")
+    cur_value = snapshot["allocator_settings"]["pinned_max_cachesize_mb"]
+    torch._C._accelerator_setAllocatorSettings(f"pinned_max_cachesize_mb:{size_mb}")
     try:
         yield
     finally:
         torch._C._accelerator_setAllocatorSettings(
-            f"pinned_max_power2_size_mb:{cur_value}"
+            f"pinned_max_cachesize_mb:{cur_value}"
         )
 
 

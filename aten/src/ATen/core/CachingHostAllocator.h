@@ -7,6 +7,7 @@
 #include <c10/util/flat_hash_map.h>
 #include <c10/util/llvmMathExtras.h>
 #include <iostream>
+#include <limits>
 #include <optional>
 
 #include <deque>
@@ -302,8 +303,8 @@ struct CachingHostAllocatorImpl {
     // rounding (and later, caching) to avoid memory waste.
     // See https://github.com/pytorch/pytorch/issues/150517
     size_t roundSize = size;
-    size_t maxPower2Size = pinned_max_power2_size();
-    if (maxPower2Size == 0 || size <= maxPower2Size) {
+    size_t maxCachesize = pinned_max_cachesize();
+    if (size <= maxCachesize) {
       roundSize = c10::llvm::PowerOf2Ceil(size);
     }
 
@@ -390,8 +391,8 @@ struct CachingHostAllocatorImpl {
     if (!events.has_value()) {
       // Check if block is too large to cache (same threshold as rounding)
       // See https://github.com/pytorch/pytorch/issues/150517
-      size_t maxPower2Size = pinned_max_power2_size();
-      if (maxPower2Size > 0 && block->size_ > maxPower2Size) {
+      size_t maxCachesize = pinned_max_cachesize();
+      if (block->size_ > maxCachesize) {
         // Block too large to cache, free it immediately
         auto& pool = pool_from_block(block);
         {
@@ -512,15 +513,15 @@ struct CachingHostAllocatorImpl {
   }
 
   /**
-   * Returns the maximum allocation size (in bytes) that will use power-of-two
-   * behavior (rounding up to next power of two and caching for reuse).
-   * Allocations larger than this will use their exact size and will not be
-   * cached, avoiding memory waste for large allocations.
-   * Returns 0 if power-of-two behavior should always be applied (default).
+   * Returns the maximum allocation size (in bytes) that will be cached.
+   * Allocations at or below this threshold use power-of-two rounding and
+   * are cached for reuse. Allocations larger than this will use their exact
+   * size and will not be cached, avoiding memory waste for large allocations.
+   * Returns SIZE_MAX by default (all allocations cached).
    * See https://github.com/pytorch/pytorch/issues/150517
    */
-  virtual size_t pinned_max_power2_size() {
-    return 0;  // Default: always use power-of-two behavior (0 = disabled)
+  virtual size_t pinned_max_cachesize() {
+    return std::numeric_limits<size_t>::max();
   }
 
   virtual void copy_data(void* dest [[maybe_unused]], const void* src [[maybe_unused]], std::size_t count [[maybe_unused]]) const {
@@ -766,8 +767,8 @@ struct CachingHostAllocatorImpl {
         auto index = size_index(block->size_);
         // Check if block is too large to cache (same threshold as rounding)
         // See https://github.com/pytorch/pytorch/issues/150517
-        size_t maxPower2Size = pinned_max_power2_size();
-        if (maxPower2Size > 0 && block->size_ > maxPower2Size) {
+        size_t maxCachesize = pinned_max_cachesize();
+        if (block->size_ > maxCachesize) {
           // Block too large to cache, free it immediately
           {
             std::lock_guard<std::mutex> g(pool.blocks_mutex_);
