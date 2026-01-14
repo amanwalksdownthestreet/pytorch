@@ -1628,6 +1628,13 @@ class NestedUserFunctionVariable(BaseUserFunctionVariable):
         finally:
             _converting.discard(self_id)
 
+    def is_python_constant(self) -> bool:
+        try:
+            self.as_python_constant()
+            return True
+        except Exception:
+            return False
+
     def _get_function_impl(self, _converting: set[int]) -> types.FunctionType:
         closure_cells = None
         if self.closure:
