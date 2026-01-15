@@ -817,6 +817,20 @@ def forward(self, arg0_1, arg1_1):
         backend = AotEagerAndRecordGraphs()
         torch.compile(foo, fullgraph=True, backend=backend)(rng, x)
 
+        fx_class = _illegal_char_regex.sub("_", get_opaque_type_name(RNGState))
+        self.assertExpectedInline(
+            backend.graphs[0].code.strip(),
+            f"""\
+def forward(self, L_rng_state_ : {fx_class}, L_x_ : torch.Tensor):
+    l_rng_state_ = L_rng_state_
+    l_x_ = L_x_
+    x = torch.ops._TestOpaqueObject.noisy_inject(l_x_, l_rng_state_);  l_x_ = None
+    x_1 = x * 1;  x = None
+    x_2 = l_rng_state_.noisy_inject(x_1);  l_rng_state_ = x_1 = None
+    x_3 = x_2 + x_2;  x_2 = None
+    return (x_3,)""",  # noqa: B950
+        )
+
         self.assertExpectedInline(
             backend.fw_graphs[0].code.strip(),
             """\
@@ -886,16 +900,19 @@ def forward(self, arg0_1, arg1_1):
         inp = (NestedCounters([Counter(1, 5), Counter(2, 5)]), torch.ones(2, 3))
         torch.compile(foo, backend=backend, fullgraph=True)(*inp)
 
-        fx_class = _illegal_char_regex.sub("_", get_opaque_type_name(Counter))
+        counter_cls = _illegal_char_regex.sub("_", get_opaque_type_name(Counter))
+        nested_counter_cls = _illegal_char_regex.sub("_", get_opaque_type_name(Counter))
         self.assertExpectedInline(
             backend.graphs[0].code.strip(),
             f"""\
-def forward(self, L_x_ : torch.Tensor, object_getattribute_L_nested_counter_c_0_ : {fx_class}, object_getattribute_L_nested_counter_c_1_ : {fx_class}):
+def forward(self, L_nested_counter_ : {nested_counter_cls}, L_x_ : torch.Tensor, object_getattribute_L_nested_counter_c_0_ : {counter_cls}, object_getattribute_L_nested_counter_c_1_ : {counter_cls}):
+    l_nested_counter_ = L_nested_counter_
     l_x_ = L_x_
     object_getattribute_l_nested_counter_c_0_ = object_getattribute_L_nested_counter_c_0_
     object_getattribute_l_nested_counter_c_1_ = object_getattribute_L_nested_counter_c_1_
     x = torch.ops._TestOpaqueObject.increment_counter(object_getattribute_l_nested_counter_c_0_, l_x_);  object_getattribute_l_nested_counter_c_0_ = l_x_ = None
     x_1 = torch.ops._TestOpaqueObject.increment_counter(object_getattribute_l_nested_counter_c_1_, x);  object_getattribute_l_nested_counter_c_1_ = x = None
+    get_starts = l_nested_counter_.get_starts();  l_nested_counter_ = get_starts = None
     x_2 = x_1 + 1;  x_1 = None
     x_3 = x_2 + 2;  x_2 = None
     return (x_3,)""",  # noqa: B950
@@ -1594,10 +1611,12 @@ class GraphModule(torch.nn.Module):
         compile_and_run_with_backend(backend)
         self.assertTrue(len(backend.graphs) > 0)
         fw_graph = backend.graphs[0]
+        
+        fx_cls = _illegal_char_regex.sub("_", get_opaque_type_name(OpaqueMultiplier))
         self.assertExpectedInline(
             fw_graph.code.strip(),
             f"""\
-def forward(self, L_x_ : torch.Tensor, L_scale_obj_ : {"test_opaque_obj_v2" if is_called_from_pytest() else "__main__"}_OpaqueMultiplier):
+def forward(self, L_x_ : torch.Tensor, L_scale_obj_ : {fx_cls}):
     l_x_ = L_x_
     l_scale_obj_ = L_scale_obj_
     result = torch.ops._TestOpaqueObject.mul_with_scale(l_scale_obj_, l_x_);  l_scale_obj_ = l_x_ = None

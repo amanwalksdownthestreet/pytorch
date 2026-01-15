@@ -3429,6 +3429,20 @@ def handle_traced_output(
             proxy,
             fake_script_obj,
         )
+    elif (
+        hasattr(example_value, "script_class_name")
+        and is_opaque_type(example_value.script_class_name)
+    ):
+        breakpoint()
+        if is_opaque_value_type(type(example_value)):
+            proxy = example_value  # pyrefly: ignore[bad-assignment]
+        fake_script_obj = torch._library.fake_class_registry.maybe_to_fake_obj(
+            tx.output.fake_mode, example_value
+        )
+        return TorchScriptObjectVariable.create(
+            proxy,
+            example_value,
+        )
     else:
         unimplemented(
             gb_type="torch.* op returned non-Tensor",

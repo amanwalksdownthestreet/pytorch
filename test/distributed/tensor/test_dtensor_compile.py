@@ -211,6 +211,70 @@ def forward(self, arg0_1, arg1_1, arg2_1):
     return (view_1,)""",  # noqa: B950
         )
 
+    def test_dtensor_mesh_slicing_and_process_group(self):
+        # Create a 2D mesh with named dimensions
+        mesh_2d = init_device_mesh(
+            self.device_type,
+            (1, self.world_size),
+            mesh_dim_names=("dp", "tp"),
+        )
+
+        def fn(x):
+            # Do some computation on the DTensor
+            y = x * 2 + 1
+
+            # Get the device mesh from the resulting DTensor
+            mesh = y.device_mesh
+
+            # Do some computation with the mesh
+            local_rank = mesh.get_local_rank("tp")
+
+            # Get a submesh via __getitem__
+            tp_mesh = mesh["tp"]
+
+            # Access the process group from the submesh
+            pg = tp_mesh.get_group()
+
+            # Do some simple computation using process group info
+            pg_size = pg.size()
+
+            return y * local_rank + pg_size
+
+        x = DTensor.from_local(
+            torch.rand(4, 4), mesh_2d, [Replicate(), Shard(0)], run_check=False
+        )
+        ref = fn(x)
+        ref = fn(x)
+
+        backend = AotEagerAndRecordGraphs()
+        opt_fn = torch.compile(fn, backend=backend, fullgraph=True)
+        res = opt_fn(x)
+        self.assertEqual(res, ref)
+        self.assertExpectedInline(
+            str(backend.graphs[0].code).strip(),
+            """\
+def forward(self, L_x_ : torch.distributed.tensor.DTensor):
+    l_x_ = L_x_
+    mul = l_x_ * 2;  l_x_ = None
+    y = mul + 1;  mul = None
+    getattr_1 = y.device_mesh
+    getitem = getattr_1.__getitem__('tp');  getattr_1 = None
+    get_group = getitem.get_group();  getitem = get_group = None
+    mul_1 = y * 0;  y = None
+    add_1 = mul_1 + 2;  mul_1 = None
+    return (add_1,)""",  # noqa: B950
+        )
+        self.assertExpectedInline(
+            str(backend.fw_graphs[0].code).strip(),
+            """\
+def forward(self, arg0_1):
+    mul = torch.ops.aten.mul.Tensor(arg0_1, 2);  arg0_1 = None
+    add = torch.ops.aten.add.Tensor(mul, 1);  mul = None
+    mul_1 = torch.ops.aten.mul.Tensor(add, 0);  add = None
+    add_1 = torch.ops.aten.add.Tensor(mul_1, 2);  mul_1 = None
+    return (add_1,)""",  # noqa: B950
+        )
+
     @unittest.skipIf(not torch.accelerator.is_available(), "accelerator not available")
     def test_dtensor_basic_export(self):
         mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))

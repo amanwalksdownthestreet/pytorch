@@ -40,6 +40,7 @@ from .. import graph_break_hints
 from ..eval_frame import skip_code
 from ..exc import unimplemented, UnsafeScriptObjectError, Unsupported
 from ..source import AttrSource
+from ..utils import proxy_args_kwargs
 from .base import VariableTracker
 from .constant import ConstantVariable
 from .dicts import ConstDictVariable
@@ -195,7 +196,14 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
                     return super().var_getattr(tx, name)
 
             elif member_type == MemberType.INLINED:
-                return super().var_getattr(tx, name)
+                # For INLINED members, return a LambdaVariable that creates a call_method node
+                value = getattr(real_obj, name)
+                if inspect.ismethod(value):
+                    return LambdaVariable(
+                        lambda *args, **kwargs: self.call_method(tx, name, args, kwargs)
+                    )
+                else:
+                    return super().var_getattr(tx, name)
 
         method = getattr(self.value, name, None)
         if method is None:
@@ -261,49 +269,89 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
                     ],
                 )
 
-            assert member_type == MemberType.USE_REAL, (
-                f"Member `{name}` of opaque object `{real_obj}` was specified to be member type `{member_type}`"
-            )
+            if member_type == MemberType.INLINED:
+                # For INLINED members, create a call_method node in the graph
+                # Execute the method on the fake object to get an example value
+                from .builder import wrap_fx_proxy
 
-            if inspect.getattr_static(value_type, "__getattr__", None) is not None:
+                args = list(args)
+                proxy_args, proxy_kwargs = proxy_args_kwargs(args, kwargs)
+                example_args = [
+                    arg.as_proxy().node.meta.get("example_value", arg.as_proxy())
+                    if hasattr(arg, "as_proxy") and hasattr(arg.as_proxy(), "node")
+                    else arg.as_python_constant()
+                    for arg in args
+                ]
+                example_kwargs = {
+                    k: v.as_proxy().node.meta.get("example_value", v.as_proxy())
+                    if hasattr(v, "as_proxy") and hasattr(v.as_proxy(), "node")
+                    else v.as_python_constant()
+                    for k, v in kwargs.items()
+                }
+
+                # Call the method on the fake object to get the example value
+                method = getattr(self.value, name)
+                example_value = method(*example_args, **example_kwargs)
+
+                return wrap_fx_proxy(
+                    tx,
+                    tx.output.create_proxy(
+                        "call_method",
+                        name,
+                        args=(self.proxy, *proxy_args),
+                        kwargs=proxy_kwargs,
+                    ),
+                    example_value=example_value,
+                )
+
+            elif member_type == MemberType.USE_REAL:
+                if inspect.getattr_static(value_type, "__getattr__", None) is not None:
+                    unimplemented(
+                        gb_type="Opaque object with custom __getattr__ not supported",
+                        context=f"{value_type.__name__} with custom __getattr__",
+                        explanation="Dynamo does not support opaque objects types with custom __getattr__ methods",
+                        hints=[],
+                    )
+
+                args_const = [x.as_python_constant() for x in args]
+                kwargs_const = {k: v.as_python_constant() for k, v in kwargs.items()}
+
+                method = getattr(real_obj, name)
+
+                if name == "__setattr__":
+                    method(*args_const, **kwargs_const)
+                    return real_obj  # pyrefly: ignore[bad-return]
+
+                constant_val = method(*args_const, **kwargs_const)
+
+                if any(
+                    is_opaque_reference_type(type(r))
+                    for r in pytree.tree_leaves(constant_val)
+                ):
+                    unimplemented(
+                        gb_type="Opaque object member with method-type USE_REAL returned a reference-type opaque object.",
+                        context=f"Opaque object type: {value_type}. Method name: '{name}'",
+                        explanation=(
+                            "To properly guard reference-type opaque objects, "
+                            "we must lift them as inputs to the graph. In order "
+                            "to do this, they must all have a source, meaning they "
+                            "come from a global value or are an attribute of an input."
+                        ),
+                        hints=[
+                            f"Register member '{name}' with MemberType.INLINED in "
+                            "register_opaque_type({value_type}, members=...).",
+                        ],
+                    )
+
+                return VariableTracker.build(tx, constant_val)
+
+            else:
                 unimplemented(
-                    gb_type="Opaque object with custom __getattr__ not supported",
-                    context=f"{value_type.__name__} with custom __getattr__",
-                    explanation="Dynamo does not support opaque objects types with custom __getattr__ methods",
+                    gb_type="Unsupported member type on OpaqueObject",
+                    context=f"value={real_obj}, attr={name}, member_type={member_type}",
+                    explanation=f"Member type '{member_type}' is not supported for this operation.",
                     hints=[],
                 )
-
-            args_const = [x.as_python_constant() for x in args]
-            kwargs_const = {k: v.as_python_constant() for k, v in kwargs.items()}
-
-            method = getattr(real_obj, name)
-
-            if name == "__setattr__":
-                method(*args_const, **kwargs_const)
-                return real_obj  # pyrefly: ignore[bad-return]
-
-            constant_val = method(*args_const, **kwargs_const)
-
-            if any(
-                is_opaque_reference_type(type(r))
-                for r in pytree.tree_leaves(constant_val)
-            ):
-                unimplemented(
-                    gb_type="Opaque object member with method-type USE_REAL returned a reference-type opaque object.",
-                    context=f"Opaque object type: {value_type}. Method name: '{name}'",
-                    explanation=(
-                        "To properly guard reference-type opaque objects, "
-                        "we must lift them as inputs to the graph. In order "
-                        "to do this, they must all have a source, meaning they "
-                        "come from a global value or are an attribute of an input."
-                    ),
-                    hints=[
-                        f"Register member '{name}' with MemberType.INLINED in "
-                        "register_opaque_type({value_type}, members=...).",
-                    ],
-                )
-
-            return VariableTracker.build(tx, constant_val)
 
         unimplemented(
             gb_type="Weird method call on TorchScript object",

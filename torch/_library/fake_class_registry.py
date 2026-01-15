@@ -1,6 +1,8 @@
 # mypy: allow-untyped-defs
 import copy
+import inspect
 import logging
+import types
 from typing import Any, Optional, Protocol, Union
 
 import torch
@@ -186,7 +188,13 @@ def maybe_to_fake_obj(
                         f"Opaque object of type '{type_name}' was specified to have member "
                         f"'{attr_name}', but this doesn't actually exist in the object."
                     )
-                object.__setattr__(fake_x_wrapped, attr_name, getattr(x, attr_name))
+                attr = getattr(x, attr_name)
+                if inspect.ismethod(attr):
+                    # Rebind the method so that `self` refers to the fake object
+                    rebound = types.MethodType(attr.__func__, fake_x_wrapped)
+                    object.__setattr__(fake_x_wrapped, attr_name, rebound)
+                else:
+                    object.__setattr__(fake_x_wrapped, attr_name, attr)
 
         return fake_x_wrapped
     else:

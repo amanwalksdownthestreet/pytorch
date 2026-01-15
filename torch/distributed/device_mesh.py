@@ -1543,7 +1543,18 @@ def _register_device_mesh_as_opaque_type():
             "_get_mesh_dim_by_name": MemberType.USE_REAL,
             "_get_root_mesh": MemberType.INLINED,
             "__getitem__": MemberType.INLINED,
+            "_get_slice_mesh_layout": MemberType.INLINED,
+            "_create_sub_mesh": MemberType.INLINED,
         },
     )
 
-    register_opaque_type(ProcessGroup, typ="reference")
+    register_opaque_type(
+        ProcessGroup, 
+        typ="reference",
+        members={
+            "size": MemberType.USE_REAL,
+            "rank": MemberType.USE_REAL,
+            "group_name": MemberType.USE_REAL,
+            "_get_backend_name": MemberType.USE_REAL,
+        }
+    )
