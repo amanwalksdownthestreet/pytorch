@@ -21,8 +21,18 @@ This class is not meant to be used directly, mainly served as a typing stub.
 void initPlacementBindings(PyObject* module) {
   auto py_module = py::reinterpret_borrow<py::module>(module);
   auto distributed_module = py_module.def_submodule("_distributed");
-  py::class_<Placement>(
-      distributed_module, "Placement", placement_class_docstring)
+
+  // Use ABCMeta as the metaclass so that FakeScriptObject can be registered
+  // as a virtual subclass, allowing isinstance(fake_obj, Placement) to work.
+  py::object abc_module = py::module_::import("abc");
+  py::object abc_meta = abc_module.attr("ABCMeta");
+  py::object abc_init = abc_module.attr("_abc_init");
+
+  auto placement_cls = py::class_<Placement>(
+      distributed_module,
+      "Placement",
+      py::metaclass(abc_meta.ptr()),
+      placement_class_docstring)
       .def(py::init<>()) // Allow construction of Python subclasses.
       .def(
           "is_partial",
@@ -30,7 +40,10 @@ void initPlacementBindings(PyObject* module) {
           py::arg("reduce_op") = py::none())
       .def("is_replicate", &Placement::is_replicate)
       .def("is_shard", &Placement::is_shard, py::arg("dim") = py::none());
-  py::class_<Shard, Placement>(distributed_module, "Shard")
+  abc_init(placement_cls);
+
+  auto shard_cls = py::class_<Shard, Placement>(
+      distributed_module, "Shard", py::metaclass(abc_meta.ptr()))
       .def(py::init<int64_t>(), py::arg("dim"))
       .def_readonly("dim", &Shard::dim)
       .def("is_shard", &Shard::is_shard, py::arg("dim") = py::none())
@@ -45,7 +58,10 @@ void initPlacementBindings(PyObject* module) {
           [](const py::dict& d) {
             return Shard(py::cast<int64_t>(d["dim"]));
           }));
-  py::class_<StridedShard, Placement>(distributed_module, "StridedShard")
+  abc_init(shard_cls);
+
+  auto strided_shard_cls = py::class_<StridedShard, Placement>(
+      distributed_module, "StridedShard", py::metaclass(abc_meta.ptr()))
       .def(
           py::init<int64_t, int64_t>(),
           py::arg("dim"),
@@ -69,7 +85,10 @@ void initPlacementBindings(PyObject* module) {
                 py::cast<int64_t>(d["dim"]),
                 py::cast<int64_t>(d["split_factor"]));
           }));
-  py::class_<Replicate, Placement>(distributed_module, "Replicate")
+  abc_init(strided_shard_cls);
+
+  auto replicate_cls = py::class_<Replicate, Placement>(
+      distributed_module, "Replicate", py::metaclass(abc_meta.ptr()))
       .def(py::init())
       .def("is_replicate", &Replicate::is_replicate)
       .def(
@@ -85,7 +104,10 @@ void initPlacementBindings(PyObject* module) {
           // enterprising reader wants to get this fixed.
           [](const Replicate& repl) { return py::dict(); },
           [](const py::dict&) { return Replicate(); }));
-  py::class_<Partial, Placement>(distributed_module, "Partial")
+  abc_init(replicate_cls);
+
+  auto partial_cls = py::class_<Partial, Placement>(
+      distributed_module, "Partial", py::metaclass(abc_meta.ptr()))
       .def(py::init<>())
       .def(py::init<std::optional<std::string>>(), py::arg("reduce_op"))
       .def_readonly("reduce_op", &Partial::reduce_op)
@@ -102,5 +124,6 @@ void initPlacementBindings(PyObject* module) {
           [](const py::dict& d) {
             return Partial(py::cast<std::string>(d["reduce_op"]));
           }));
+  abc_init(partial_cls);
 }
 } // namespace torch::distributed
