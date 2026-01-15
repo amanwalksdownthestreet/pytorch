@@ -35,6 +35,7 @@ You can register a custom class as being a reference-based opaque object class
 through `register_opaque_type(MyClass, typ="value")`.
 """
 
+from abc import ABCMeta
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -157,6 +158,21 @@ def register_opaque_type(
             f"{cls} cannot be registered as an opaque object as it has been "
             "registered as a pytree. Opaque objects must be pytree leaves."
         )
+
+    if not isinstance(cls, ABCMeta):
+        raise TypeError(
+            f"Opaque type {cls} must use ABCMeta as its metaclass. "
+            "This is required so that FakeScriptObject can be registered "
+            "as a virtual subclass, allowing isinstance() checks to work "
+            "during torch.compile tracing. You can add 'metaclass=ABCMeta' or "
+            "inherit from ABC."
+        )
+
+    # Register FakeScriptObject as a virtual subclass of `cls` so that when
+    # tracing, if we do isinstance(x, OpaqueType) where x is a FakeScriptObject,
+    # this will pass
+    from torch._library.fake_class_registry import FakeScriptObject
+    cls.register(FakeScriptObject)
 
     if typ not in ["reference", "value"]:
         raise AssertionError(

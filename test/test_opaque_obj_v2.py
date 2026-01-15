@@ -3,6 +3,7 @@
 import contextlib
 import gc
 import random
+from abc import ABCMeta
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Optional
@@ -44,7 +45,7 @@ from torch.testing._internal.common_utils import (
 )
 
 
-class OpaqueQueue:
+class OpaqueQueue(metaclass=ABCMeta):
     def __init__(self, queue: list[torch.Tensor], init_tensor_: torch.Tensor) -> None:
         super().__init__()
         self.queue = queue
@@ -70,7 +71,7 @@ class OpaqueQueue:
         return len(self.queue)
 
 
-class NestedQueue:
+class NestedQueue(metaclass=ABCMeta):
     def __init__(self, q):
         self.q = q
 
@@ -81,7 +82,7 @@ class NestedQueue:
         return torch.ops._TestOpaqueObject.queue_pop(self.q)
 
 
-class RNGState:
+class RNGState(metaclass=ABCMeta):
     def __init__(self, seed):
         self.seed = seed
         self.rng = random.Random(self.seed)
@@ -94,14 +95,14 @@ class RNGState:
         return torch.ops._TestOpaqueObject.noisy_inject(x, self)
 
 
-class OpaqueMultiplier:
+class OpaqueMultiplier(metaclass=ABCMeta):
     """Opaque object that holds a multiplier value for backward tests."""
 
     def __init__(self, multiplier: float):
         self.multiplier = multiplier
 
 
-class Counter:
+class Counter(metaclass=ABCMeta):
     def __init__(self, start, end):
         self.start = start
         self.end = end
@@ -124,7 +125,7 @@ class Counter:
         self.start += 1
 
 
-class NestedCounters:
+class NestedCounters(metaclass=ABCMeta):
     def __init__(self, c):
         self.c = c
 
@@ -138,12 +139,12 @@ class NestedCounters:
             return self.c.start
 
 
-class AddModule(torch.nn.Module):
+class AddModule(torch.nn.Module, metaclass=ABCMeta):
     def forward(self, x, y):
         return x * y
 
 
-class ValueConfig:
+class ValueConfig(metaclass=ABCMeta):
     def __init__(self, mode: str):
         self.mode = mode
 
@@ -160,12 +161,12 @@ class ValueConfig:
         print(self.mode)
 
 
-class SizeStore:
+class SizeStore(metaclass=ABCMeta):
     def __init__(self, size: int):
         self.size = size
 
     def __eq__(self, other):
-        return isinstance(other, ValueConfig) and self.size == other.size
+        return isinstance(other, SizeStore) and self.size == other.size
 
     def __hash__(self):
         return hash(self.size)
@@ -178,7 +179,7 @@ class SizeStore:
         return self.size + 1
 
 
-class NestedValueSize:
+class NestedValueSize(metaclass=ABCMeta):
     def __init__(self, size: SizeStore, config: ValueConfig):
         self.size = size
         self.config = config
@@ -253,7 +254,7 @@ register_opaque_type(OpaqueMultiplier, typ="reference")
 # object
 class TensorWithCounter(torch.Tensor):
     @staticmethod
-    def __new__(cls, a, b, counter, outer_size=None, outer_stride=None):
+    def __new__(cls, a, b, counter, size_store, outer_size=None, outer_stride=None):
         if outer_size is None:
             outer_size = a.size()
         if outer_stride is None:
@@ -270,22 +271,23 @@ class TensorWithCounter(torch.Tensor):
         out = torch.Tensor._make_wrapper_subclass(cls, outer_size, **kwargs)
         return out
 
-    def __init__(self, a, b, counter, outer_size=None, outer_stride=None):
+    def __init__(self, a, b, counter, size_store, outer_size=None, outer_stride=None):
         self.a = a
         self.b = b
         self._counter = counter
+        self._size_store = size_store
 
     def __repr__(self):
-        return f"TensorWithCounter({self.a}, {self.b}, {self._counter})"
+        return f"TensorWithCounter({self.a}, {self.b}, {self._counter}, {self._size_store})"
 
     def __tensor_flatten__(self):
-        return ["a", "b"], self._counter
+        return ["a", "b"], (self._counter, self._size_store)
 
     @staticmethod
     def __tensor_unflatten__(inner_tensors, ctx, outer_size, outer_stride):
         a, b = inner_tensors["a"], inner_tensors["b"]
-        counter = ctx
-        return TensorWithCounter(a, b, counter, outer_size, outer_stride)
+        counter, size_store = ctx
+        return TensorWithCounter(a, b, counter, size_store, outer_size, outer_stride)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs):
@@ -295,25 +297,37 @@ class TensorWithCounter(torch.Tensor):
         def unwrap(x):
             return x.a if isinstance(x, TensorWithCounter) else x
 
-        def wrap(x, counter):
+        def wrap(x, counter, size_store):
             return (
-                TensorWithCounter(x, x.clone(), counter)
+                TensorWithCounter(x, x.clone(), counter, size_store)
                 if isinstance(x, torch.Tensor)
                 else x
             )
 
         # Get counter from first TensorWithCounter arg
         counter = None
+        size_store = None
         for arg in torch.utils._pytree.tree_leaves(args):
             if isinstance(arg, TensorWithCounter):
                 counter = arg._counter
+                size_store = arg._size_store
                 break
 
         unwrapped_args = torch.utils._pytree.tree_map(unwrap, args)
         unwrapped_kwargs = torch.utils._pytree.tree_map(unwrap, kwargs)
 
         out = func(*unwrapped_args, **unwrapped_kwargs)
-        return torch.utils._pytree.tree_map(lambda x: wrap(x, counter), out)
+        return torch.utils._pytree.tree_map(lambda x: wrap(x, counter, size_store), out)
+
+    @property
+    def size_store(self):
+        return self._size_store
+
+    def get_size_store(self):
+        return self._size_store
+
+    def get_counter(self):
+        return self._counter
 
 
 class TestOpaqueObject(TestCase):
@@ -399,6 +413,7 @@ class TestOpaqueObject(TestCase):
 
         @torch.library.register_fake("_TestOpaqueObject::noisy_inject", lib=self.lib)
         def noisy_inject_fake(x: torch.Tensor, obj: RNGState) -> torch.Tensor:
+            assert isinstance(obj, RNGState)
             assert obj.seed >= 0
             return torch.empty_like(x)
 
@@ -744,6 +759,7 @@ def forward(self, arg0_1, arg1_1, arg2_1):
 
     def test_compile1(self):
         def foo(rng_state, x):
+            assert isinstance(rng_state, RNGState)
             x = torch.ops._TestOpaqueObject.noisy_inject(x, rng_state)
             x = x * x
             x = torch.ops._TestOpaqueObject.noisy_inject(x, rng_state)
@@ -765,9 +781,9 @@ def forward(self, arg0_1, arg1_1, arg2_1):
         self.assertExpectedInline(
             backend.graphs[0].code.strip(),
             f"""\
-def forward(self, L_x_ : torch.Tensor, L_rng_state_ : {fx_class}):
-    l_x_ = L_x_
+def forward(self, L_rng_state_ : {fx_class}, L_x_ : torch.Tensor):
     l_rng_state_ = L_rng_state_
+    l_x_ = L_x_
     x = torch.ops._TestOpaqueObject.noisy_inject(l_x_, l_rng_state_);  l_x_ = None
     x_1 = x * x;  x = None
     x_2 = torch.ops._TestOpaqueObject.noisy_inject(x_1, l_rng_state_);  x_1 = l_rng_state_ = None
@@ -778,9 +794,9 @@ def forward(self, L_x_ : torch.Tensor, L_rng_state_ : {fx_class}):
             backend.fw_graphs[0].code.strip(),
             """\
 def forward(self, arg0_1, arg1_1):
-    noisy_inject = torch.ops._TestOpaqueObject.noisy_inject.default(arg0_1, arg1_1);  arg0_1 = None
+    noisy_inject = torch.ops._TestOpaqueObject.noisy_inject.default(arg1_1, arg0_1);  arg1_1 = None
     mul = torch.ops.aten.mul.Tensor(noisy_inject, noisy_inject);  noisy_inject = None
-    noisy_inject_1 = torch.ops._TestOpaqueObject.noisy_inject.default(mul, arg1_1);  mul = arg1_1 = None
+    noisy_inject_1 = torch.ops._TestOpaqueObject.noisy_inject.default(mul, arg0_1);  mul = arg0_1 = None
     add = torch.ops.aten.add.Tensor(noisy_inject_1, noisy_inject_1);  noisy_inject_1 = None
     return (add,)""",  # noqa: B950
         )
@@ -1129,7 +1145,18 @@ def forward(self, primals, tangents):
         self.assertEqual(compiled_fn(*inp), M()(*inp))
 
     def test_invalid_reference_type(self):
-        class BadMember:
+        # Test that classes without ABCMeta as metaclass are rejected
+        class NoABCMeta:
+            def __init__(self, x):
+                self.x = x
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "must use ABCMeta as its metaclass",
+        ):
+            register_opaque_type(NoABCMeta, typ="reference")
+
+        class BadMember(metaclass=ABCMeta):
             def __init__(self, x):
                 self.x = x
 
@@ -1146,7 +1173,7 @@ def forward(self, primals, tangents):
             torch.compile(foo)(BadMember(1), torch.ones(1))
 
     def test_invalid_value_type(self):
-        class NoEq:
+        class NoEq(metaclass=ABCMeta):
             def __init__(self, x):
                 self.x = x
 
@@ -1155,7 +1182,7 @@ def forward(self, primals, tangents):
         ):
             register_opaque_type(NoEq, typ="value")
 
-        class NoHash:
+        class NoHash(metaclass=ABCMeta):
             def __init__(self, x):
                 self.x = x
 
@@ -1167,7 +1194,7 @@ def forward(self, primals, tangents):
         ):
             register_opaque_type(NoHash, typ="value")
 
-        class NoRepr:
+        class NoRepr(metaclass=ABCMeta):
             def __init__(self, x):
                 self.x = x
 
@@ -1180,7 +1207,7 @@ def forward(self, primals, tangents):
         with self.assertRaisesRegex(TypeError, "expected to have a `__fx_repr__`"):
             register_opaque_type(NoRepr, typ="value")
 
-        class SpecifyMember:
+        class SpecifyMember(metaclass=ABCMeta):
             def __init__(self, x):
                 self.x = x
 
@@ -1236,7 +1263,7 @@ def forward(self, primals, tangents):
                 register_opaque_type(t, typ="reference")
 
         @dataclass
-        class Bad1:
+        class Bad1(metaclass=ABCMeta):
             x: int
 
         pytree.register_dataclass(Bad1)
@@ -1253,7 +1280,7 @@ def forward(self, primals, tangents):
             pytree.CONSTANT_NODES.discard(Bad1)
 
         @dataclass
-        class Bad2:
+        class Bad2(metaclass=ABCMeta):
             x: int
 
         register_opaque_type(Bad2, typ="reference")
@@ -1390,7 +1417,7 @@ def forward(self, arg0_1):
 
     def test_weakref_cleanup(self):
         def register_tmp_class():
-            class TmpClass:
+            class TmpClass(metaclass=ABCMeta):
                 def __init__(self, value):
                     self.value = value
 
