@@ -1472,13 +1472,17 @@ def forward(self, arg0_1):
     def test_tensor_subclass_with_opaque_attr(self):
         def fn(x):
             y = x * 2 + 1
-            counter = y._counter
-            return y * counter.start
+            c1 = y._counter
+            c2 = y.get_counter()
+            s1 = y.size_store
+            s2 = y.get_size_store()
+            return y * c1.start + c2.start + s1.size + s2.size
 
         a = torch.rand(4, 4)
         b = torch.rand(4, 4)
         counter = Counter(start=3, end=10)
-        x = TensorWithCounter(a, b, counter)
+        size = SizeStore(4)
+        x = TensorWithCounter(a, b, counter, size)
 
         backend = EagerAndRecordGraphs()
         cnt = CompileCounterWithBackend(backend)
@@ -1499,8 +1503,15 @@ class GraphModule(torch.nn.Module):
 
         getattr_1 = y._counter;  getattr_1 = None
 
+        get_counter = y.get_counter();  get_counter = None
+
+        get_size_store = y.get_size_store();  get_size_store = None
+
         mul_1: "TensorWithCounter(f32[4, 4])" = y * 3;  y = None
-        return (mul_1,)
+        add_1: "TensorWithCounter(f32[4, 4])" = mul_1 + 3;  mul_1 = None
+        add_2: "TensorWithCounter(f32[4, 4])" = add_1 + 4;  add_1 = None
+        add_3: "TensorWithCounter(f32[4, 4])" = add_2 + 4;  add_2 = None
+        return (add_3,)
 """,
         )
         self.assertEqual(cnt.frame_count, 1)
@@ -1508,11 +1519,20 @@ class GraphModule(torch.nn.Module):
         a = torch.rand(4, 4)
         b = torch.rand(4, 4)
         counter = Counter(start=1, end=10)
-        x = TensorWithCounter(a, b, counter)
+        x = TensorWithCounter(a, b, counter, SizeStore(4))
         opt_fn(x)
 
         # Recompile since Counter has changed
         self.assertEqual(cnt.frame_count, 2)
+
+        a = torch.rand(4, 4)
+        b = torch.rand(4, 4)
+        counter = Counter(start=1, end=10)
+        x = TensorWithCounter(a, b, counter, SizeStore(5))
+        opt_fn(x)
+
+        # Recompile since SizeStore has changed
+        self.assertEqual(cnt.frame_count, 3)
 
     def test_opaque_obj_saved_for_backward(self):
         """Test that opaque objects are correctly saved and passed to backward."""
