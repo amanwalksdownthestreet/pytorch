@@ -46,6 +46,10 @@ from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
 
 from . import config
+from torch._inductor.custom_graph_pass import (
+    CustomKnapsackSolver,
+    CustomRuntimeEstimator,
+)
 from ._activation_checkpointing.graph_info_provider import GraphInfoProvider
 from ._activation_checkpointing.knapsack import (
     dp_knapsack,
@@ -2458,7 +2462,7 @@ def _optimize_runtime_with_given_memory(
                 max_mem_budget=max_memory,
             ),
         )
-    elif callable(SOLVER):
+    elif isinstance(SOLVER, CustomKnapsackSolver):
         saved_node_idx, recomp_node_idx = SOLVER(
             memory, joint_graph, max_memory, node_info, all_recomputable_banned_nodes
         )
@@ -2518,7 +2522,7 @@ def estimate_runtime(node):
         counted_flops = mode.get_total_flops()
         return max(counted_flops, 1)
 
-    elif callable(RUNTIME_MODE):
+    elif isinstance(RUNTIME_MODE, CustomRuntimeEstimator):
         return RUNTIME_MODE(node)
 
     else:
