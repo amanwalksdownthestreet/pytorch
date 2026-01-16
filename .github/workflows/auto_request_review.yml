@@ -18,6 +18,32 @@ jobs:
         uses: necojackarc/auto-request-review@e08cdffa277d50854744de3f76230260e61c67f4 # v0.7.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Add triage label if reviewers are present
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { owner, repo, number } = context.issue;
+            // Get PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: number,
+            });
+            // Check for requested reviewers (users) or teams
+            const hasUserReviewers = pr.requested_reviewers && pr.requested_reviewers.length > 0;
+            const hasTeamReviewers = pr.requested_teams && pr.requested_teams.length > 0;
+            if (hasUserReviewers || hasTeamReviewers) {
+              // Add label if either is non-empty
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: number,
+                labels: ['triage'],
+              });
+              console.log('Label added: triage');
+            } else {
+              console.log('No reviewers or team reviewers requested.');
+            }
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
