@@ -227,6 +227,7 @@ class Tracker:
 input_codes = Tracker()
 output_codes = Tracker()
 
+
 initial_global_state: Optional[GlobalStateGuard] = None
 
 
@@ -1606,7 +1607,7 @@ def _compile(
             # they are benign and do not generate any new graphs.
             hooks.guard_export_fn(output.guards)
 
-        return wrap_guarded_code(guarded_code), tracer_output
+        return wrap_guarded_code(guarded_code, one_graph), tracer_output
 
     metrics_context = get_metrics_context()
     code_context = (
