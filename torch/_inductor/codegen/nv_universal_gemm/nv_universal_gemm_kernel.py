@@ -5,8 +5,10 @@ NVIDIA Universal GEMM kernel code generation.
 This module generates Python code that calls cutlass_api to execute GEMM operations.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, Optional, Union
+from typing import Any, Optional, TYPE_CHECKING, Union
 
 from torch._inductor.codegen.common import (
     IndentedBuffer,
@@ -24,6 +26,10 @@ from torch._inductor.ir import (
 )
 from torch._inductor.virtualized import V
 from torch.utils._ordered_set import OrderedSet
+
+
+if TYPE_CHECKING:
+    from torch._inductor.codegen.nv_universal_gemm.nv_universal_gemm import GemmVariant
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +63,7 @@ class NVUniversalGemmKernel(Kernel):
         output_node: Buffer,
         kernel_metadata: dict[str, Any],
         accumulator_type: Any,
+        variant: GemmVariant,
         workspace_size: int = 0,
     ) -> None:
         super().__init__()
@@ -66,6 +73,7 @@ class NVUniversalGemmKernel(Kernel):
         self.kernel_metadata = kernel_metadata
         self.accumulator_type = accumulator_type
         self.workspace_size = workspace_size
+        self.variant = variant
 
         self._template_input_args: list[tuple[str, Buffer]] = []
         self._seen_input_args: OrderedSet[str] = OrderedSet()
@@ -96,53 +104,83 @@ class NVUniversalGemmKernel(Kernel):
             Python source code string to be written to a .py file and loaded
             via async_compile.nv_universal_gemm()
         """
+        from torch._inductor.codegen.nv_universal_gemm.nv_universal_gemm import (
+            GemmVariant,
+        )
+
         kernel_name_str = self.kernel_metadata["kernel_name"]
+        is_grouped = self.variant == GemmVariant.GROUPED_GEMM
 
         acc_dtype_str = CuteDSLOpOverrides.TORCH_TO_CUTE_DTYPE.get(
             self.accumulator_type, "cutlass.Float32"
         )
 
         input_params = [f"in_ptr{i}" for i, _ in enumerate(self.input_nodes)]
-        input_params.extend(["out_ptr0"])
-        # Add workspace parameter if needed
+        input_params.append("out_ptr0")
         if self.workspace_size > 0:
             input_params.append("workspace")
         input_params.append("stream=None")
         params_str = ", ".join(input_params)
 
-        code = IndentedBuffer()
-
-        # Build workspace argument for kernel.run() call
         workspace_arg = "workspace" if self.workspace_size > 0 else "None"
 
+        var_prefix = self.variant.op_name.upper()
+        cache_var = f"_{var_prefix}_compiled_cache"
+        kernel_name_var = f"_{var_prefix}_KERNEL_NAME"
+
+        # Variant-specific code generation:
+        # - preprocess_inputs: input transformations before args creation
+        # - cache_key_code: expression for cache key
+        # - create_args_code: code to create Arguments object
+        if is_grouped:
+            preprocess_inputs = """# Transpose B from K-major to N-major for CUTLASS compatibility
+                in_ptr1_transposed = in_ptr1.permute(0, 2, 1).contiguous().permute(0, 2, 1)"""
+            cache_key_code = "(in_ptr0.shape, in_ptr0.dtype, in_ptr1.shape, in_ptr1.dtype, in_ptr2.shape)"
+            create_args_code = f"""args = cutlass_api.arguments.GroupedGemmArguments(
+                        in_ptr0,
+                        in_ptr1_transposed,
+                        out_ptr0,
+                        accumulator_type={acc_dtype_str},
+                        offsets=in_ptr2,
+                    )"""
+        else:
+            preprocess_inputs = ""
+            cache_key_code = (
+                "(in_ptr0.shape, in_ptr0.dtype, in_ptr1.shape, in_ptr1.dtype)"
+            )
+            create_args_code = f"""args = cutlass_api.arguments.GemmArguments(
+                        in_ptr0,
+                        in_ptr1,
+                        out_ptr0,
+                        accumulator_type={acc_dtype_str},
+                    )"""
+
+        code = IndentedBuffer()
         code.splice(
             f"""
             import cutlass
             import cutlass_api
             from torch._inductor.codegen.nv_universal_gemm.kernel_cache import get_kernel_by_name
 
-            _NV_UNIVERSAL_GEMM_KERNEL_NAME = "{kernel_name_str}"
-            _nv_universal_gemm_artifact_cache = {{}}
+            {kernel_name_var} = "{kernel_name_str}"
+            {cache_var} = {{}}
 
             def {self.kernel_name}_main({params_str}):
-                global _nv_universal_gemm_artifact_cache
+                global {cache_var}
 
-                kernel = get_kernel_by_name(_NV_UNIVERSAL_GEMM_KERNEL_NAME)
+                kernel = get_kernel_by_name({kernel_name_var})
                 if kernel is None:
-                    raise RuntimeError(f"Could not find NVIDIA Universal GEMM kernel: {{_NV_UNIVERSAL_GEMM_KERNEL_NAME}}")
+                    raise RuntimeError(f"Could not find kernel: {{{kernel_name_var}}}")
 
-                args = cutlass_api.arguments.GemmArguments(
-                    in_ptr0,
-                    in_ptr1,
-                    out_ptr0,
-                    accumulator_type={acc_dtype_str},
-                )
+                {preprocess_inputs}
 
-                cache_key = (in_ptr0.shape, in_ptr0.dtype, in_ptr1.shape, in_ptr1.dtype)
-                if cache_key not in _nv_universal_gemm_artifact_cache:
-                    _nv_universal_gemm_artifact_cache[cache_key] = kernel.compile(args)
+                {create_args_code}
 
-                artifact = _nv_universal_gemm_artifact_cache[cache_key]
+                cache_key = {cache_key_code}
+                if cache_key not in {cache_var}:
+                    {cache_var}[cache_key] = kernel.compile(args)
+
+                artifact = {cache_var}[cache_key]
                 kernel.run(args, artifact, stream=stream, workspace={workspace_arg}, assume_supported_args=True)
             """
         )
