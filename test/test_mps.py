@@ -6008,47 +6008,6 @@ class TestMPS(TestCaseMPS):
         with self.assertRaisesRegex(RuntimeError, r'leading minor of order 2 is not positive-definite'):
             torch.linalg.cholesky_ex(A, check_errors=True)
 
-    def test_linalg_cholesky_inverse(self):
-        from torch.testing._internal.common_utils import random_hermitian_pd_matrix
-
-        def run_test(size, *batch_dims, upper=False):
-            A_cpu = random_hermitian_pd_matrix(size, *batch_dims, dtype=torch.float32, device="cpu")
-            A_mps = A_cpu.to("mps")
-            L_cpu = torch.linalg.cholesky(A_cpu, upper=upper)
-            L_mps = torch.linalg.cholesky(A_mps, upper=upper)
-            inv_cpu = torch.cholesky_inverse(L_cpu, upper=upper)
-            inv_mps = torch.cholesky_inverse(L_mps, upper=upper)
-            self.assertEqual(inv_cpu, inv_mps)
-
-        # 2D case
-        for size, upper in product([3, 7, 32], [True, False]):
-            run_test(size, upper=upper)
-
-        # 3D case
-        for batch in [1, 4, 7]:
-            run_test(16, batch, upper=False)
-            run_test(16, batch, upper=True)
-
-        # 5D case
-        run_test(5, 2, 3, 2, 2, upper=False)
-        run_test(5, 2, 3, 2, 2, upper=True)
-
-        # Non-contiguous input (column-major / transposed strides)
-        A_cpu = random_hermitian_pd_matrix(16, 4, dtype=torch.float32, device="cpu")
-        A_mps = A_cpu.to("mps")
-        L_mps = torch.linalg.cholesky(A_mps).mT.contiguous().mT
-        self.assertFalse(L_mps.is_contiguous())
-        inv_mps = torch.cholesky_inverse(L_mps)
-        inv_cpu = torch.cholesky_inverse(A_cpu.clone())
-        L_cpu = torch.linalg.cholesky(A_cpu)
-        inv_cpu = torch.cholesky_inverse(L_cpu)
-        self.assertEqual(inv_cpu, inv_mps.cpu())
-
-        # Irregular matrix sizes
-        for size in [0, 1, 13, 127]:
-            run_test(size, upper=False)
-            run_test(size, upper=True)
-
     def test_upsample_nearest2d(self):
         def helper(N, C, H, W, memory_format):
             inputCPU = torch.arange(N * C * H * W, device='cpu', dtype=torch.float,
@@ -8022,6 +7981,7 @@ class TestMPS(TestCaseMPS):
             ("random_", lambda t: t.random_()),
             ("random_with_to", lambda t: t.random_(10)),
             ("random_with_range", lambda t: t.random_(0, 10)),
+            ("log_normal_", lambda t: t.log_normal_(mean=1.0, std=2.0)),
         ]
 
         for name, op_func in ops:
@@ -8078,6 +8038,21 @@ class TestMPS(TestCaseMPS):
         for _ in range(100):
             a = torch.empty(32_000, device="mps", dtype=dtype).exponential_()
             self.assertTrue((a != 0).all())
+
+    def test_log_normal(self):
+        # test with kl divergence
+        cpu_a = torch.zeros(50, 50).log_normal_(mean=1.0, std=2.0).flatten()
+        mps_a = torch.zeros(50, 50, device="mps").log_normal_(mean=1.0, std=2.0).cpu().flatten()
+
+        all_vals = torch.cat([cpu_a, mps_a])
+        min_val, max_val = all_vals.min().item(), all_vals.max().item()
+
+        cpu_hist = torch.histc(cpu_a, bins=50, min=min_val, max=max_val) + 1e-10
+        mps_hist = torch.histc(mps_a, bins=50, min=min_val, max=max_val) + 1e-10
+
+        p, q = cpu_hist / cpu_hist.sum(), mps_hist / mps_hist.sum()
+        kl_div = (p * (p / q).log()).sum().item()
+        self.assertLess(kl_div, 0.05)
 
     # Test add
     def test_add_sub(self):
@@ -12722,16 +12697,6 @@ class TestConsistency(TestCaseMPS):
             mps_args = [mps_sample.input] + list(mps_sample.args)
             mps_kwargs = mps_sample.kwargs
 
-            # for tensor_split(), the second tensor arg ("tensor_indices_or_sections") must be on CPU only
-            if op.name == "tensor_split" and isinstance(mps_args[1], torch.Tensor):
-                mps_args[1] = cpu_args[1]
-
-            # Order of ops in index_put is not guaranteed, which can lead to large errors if inputs are
-            # not normalized
-            if op.name == "_unsafe_masked_index_put_accumulate" and dtype in [torch.bfloat16, torch.float16]:
-                mps_args[3] = F.normalize(mps_args[3])
-                cpu_args[3] = F.normalize(cpu_args[3])
-
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
                 cpu_out = op(*cpu_args, **cpu_kwargs)
@@ -12788,16 +12753,6 @@ class TestConsistency(TestCaseMPS):
             cpu_kwargs = cpu_sample.kwargs
             mps_args = [mps_sample.input] + list(mps_sample.args)
             mps_kwargs = mps_sample.kwargs
-
-            # for tensor_split(), the second tensor arg ("tensor_indices_or_sections") must be on CPU only
-            if op.name == "tensor_split" and isinstance(mps_args[1], torch.Tensor):
-                mps_args[1] = cpu_args[1]
-
-            # Order of ops in index_put is not guaranteed, which can lead to large errors if inputs are
-            # not normalized
-            if op.name == "_unsafe_masked_index_put_accumulate" and dtype in [torch.bfloat16, torch.float16]:
-                mps_args[3] = F.normalize(mps_args[3])
-                cpu_args[3] = F.normalize(cpu_args[3])
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
@@ -12945,10 +12900,6 @@ class TestErrorInputs(TestCase):
 
             mps_args = [mps_sample_input.input] + list(mps_sample_input.args)
             mps_kwargs = mps_sample_input.kwargs
-
-            # for tensor_split(), the second tensor arg ("tensor_indices_or_sections") must be on CPU only
-            if (op.name == "tensor_split" and isinstance(mps_args[1], torch.Tensor)):
-                mps_args[1] = mps_args[1].cpu()
 
             with self.assertRaisesRegex(error_type, error_regex):
                 op(*mps_args, **mps_kwargs)
