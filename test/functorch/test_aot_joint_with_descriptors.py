@@ -6,6 +6,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections import defaultdict
 from contextlib import ExitStack
 
 import torch
@@ -1141,6 +1142,63 @@ class inner_f(torch.nn.Module):
 ('call_function', 'sum_2', {'test': 1})
 ('call_function', 'view_1', {'test': 1})
 ('call_function', 't_9', {'test': 1})""",
+        )
+
+    def test_annotate_invoke_subgraph_simple(self):
+        class Bar(nn.Module):
+            @torch.compiler.nested_compile_region
+            def forward(self, x):
+                with fx_traceback.annotate({"mod_name": "bar"}):
+                    y = x.sin()
+                    return y * 1
+
+        class MyMod(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.bar = Bar()
+
+            def forward(self, x):
+                with fx_traceback.annotate({"mod_name": "my_mod"}):
+                    z = self.bar(x)
+                return z - 1
+
+        inputs = (torch.randn(4, 3, requires_grad=True),)
+        model = MyMod()
+
+        # invoke_subgraph doesn't seem to work with with_export=False, no subgraph created
+        graph_module = graph_capture(model, inputs, with_export=True)
+
+        # The two invoke_subgraph HOP nodes should have the same seq_nr
+        seq_nrs = {
+            node.meta.get("seq_nr", None)
+            for node in graph_module.graph.find_nodes(
+                op="call_function", target=torch.ops.higher_order.invoke_subgraph
+            )
+        }
+        self.assertEqual(len(seq_nrs), 1)
+
+        seq_nr_dict = defaultdict(set)
+        for node in graph_module.repeated_subgraph1.graph.nodes:
+            if node.op == "call_function":
+                seq_nr_dict[node.meta.get("seq_nr")].add(node.name)
+        # Group of nodes with the same seq_nr in the bw/joint graph
+        self.assertEqual(
+            list(seq_nr_dict.values()), [{"sin", "cos", "mul_2"}, {"mul", "mul_1"}]
+        )
+
+        custom_metadata = fx_traceback._get_custom_metadata(graph_module)
+        # TODO (shangdiy): need to remove the annotation the forward subggraph's placeholders and output.
+        self.assertExpectedInline(
+            str(custom_metadata),
+            """\
+('get_attr', 'repeated_subgraph0', {'mod_name': 'my_mod'})
+[('placeholder', 'arg0_1', {'mod_name': 'my_mod'}), ('call_function', 'sin', {'mod_name': 'bar'}), ('call_function', 'mul', {'mod_name': 'bar'}), ('output', 'output', {'mod_name': 'my_mod'})]
+('call_function', 'invoke_subgraph', {'mod_name': 'my_mod'})
+('call_function', 'getitem', {'mod_name': 'my_mod'})
+('get_attr', 'repeated_subgraph1', {'mod_name': 'my_mod'})
+[('placeholder', 'arg0_1', {'mod_name': 'my_mod'}), ('placeholder', 'arg1_1', {'mod_name': 'my_mod'}), ('call_function', 'sin', {'mod_name': 'bar'}), ('call_function', 'mul', {'mod_name': 'bar'}), ('call_function', 'mul_1', {'mod_name': 'bar'}), ('call_function', 'cos', {'mod_name': 'bar'}), ('call_function', 'mul_2', {'mod_name': 'bar'}), ('output', 'output', {'mod_name': 'my_mod'})]
+('call_function', 'invoke_subgraph_1', {'mod_name': 'my_mod'})
+('call_function', 'getitem_1', {'mod_name': 'my_mod'})""",  # noqa: B950
         )
 
 
