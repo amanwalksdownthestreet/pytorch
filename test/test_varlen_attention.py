@@ -9,7 +9,7 @@ from torch.nn.attention.varlen import varlen_attn
 from torch.testing._internal.common_cuda import PLATFORM_SUPPORTS_FLASH_ATTENTION
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_nn import NNTestCase
-from torch.testing._internal.common_utils import parametrize, run_tests
+from torch.testing._internal.common_utils import parametrize, run_tests, TEST_WITH_ROCM
 from torch.utils._python_dispatch import TorchDispatchMode
 
 
@@ -66,11 +66,21 @@ class AttentionBlock(nn.Module):
         max_len: int,
         is_causal: bool = False,
         scale: float | None = None,
+        window_size: tuple[int, int] = (-1, -1),
     ):
         q, k, v = self.get_varlen_qkv(x_packed)
 
         attn_out = varlen_attn(
-            q, k, v, cu_seq, cu_seq, max_len, max_len, is_causal, scale=scale
+            q,
+            k,
+            v,
+            cu_seq,
+            cu_seq,
+            max_len,
+            max_len,
+            is_causal=is_causal,
+            scale=scale,
+            window_size=window_size,
         )
         attn_out = attn_out.view(-1, self.embed_dim)
 
@@ -82,6 +92,7 @@ class AttentionBlock(nn.Module):
         seq_lengths: torch.Tensor,
         is_causal: bool = False,
         scale: float | None = None,
+        window_size: tuple[int, int] = (-1, -1),
     ):
         batch_size, seq_len, _ = x_padded.shape
 
@@ -103,6 +114,18 @@ class AttentionBlock(nn.Module):
             )
             # Combine: attention allowed where BOTH padding is valid AND causal constraint is met
             attn_mask = attn_mask & causal_mask[None, None, :, :]
+
+        if window_size[0] >= 0 or window_size[1] >= 0:
+            window_mask = torch.zeros(
+                seq_len, seq_len, dtype=torch.bool, device=x_padded.device
+            )
+            for i in range(seq_len):
+                start = i - window_size[0] if window_size[0] >= 0 else 0
+                end = i + window_size[1] + 1 if window_size[1] >= 0 else seq_len
+                start = max(start, 0)
+                end = min(end, seq_len)
+                window_mask[i, start:end] = True
+            attn_mask = attn_mask & window_mask[None, None, :, :]
 
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -174,6 +197,9 @@ class TestVarlenAttention(NNTestCase):
     @unittest.skipIf(
         not PLATFORM_SUPPORTS_FLASH_ATTENTION, "Flash Attention not supported"
     )
+    @unittest.skipIf(
+        TEST_WITH_ROCM, "varlen attention w/ sliding window not supported on ROCm"
+    )
     @parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_basic_functionality(self, device, dtype):
         torch.manual_seed(42)
@@ -221,6 +247,9 @@ class TestVarlenAttention(NNTestCase):
 
     @unittest.skipIf(
         not PLATFORM_SUPPORTS_FLASH_ATTENTION, "Flash Attention not supported"
+    )
+    @unittest.skipIf(
+        TEST_WITH_ROCM, "varlen attention w/ sliding window not supported on ROCm"
     )
     @parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_custom_op_compliance(self, device, dtype):
@@ -279,6 +308,9 @@ class TestVarlenAttention(NNTestCase):
     @unittest.skipIf(
         not PLATFORM_SUPPORTS_FLASH_ATTENTION, "Flash Attention not supported"
     )
+    @unittest.skipIf(
+        TEST_WITH_ROCM, "varlen attention w/ sliding window not supported on ROCm"
+    )
     @parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_custom_op_registration(self, device, dtype):
         torch.manual_seed(42)
@@ -329,10 +361,14 @@ class TestVarlenAttention(NNTestCase):
     @unittest.skipIf(
         not PLATFORM_SUPPORTS_FLASH_ATTENTION, "Flash Attention not supported"
     )
+    @unittest.skipIf(
+        TEST_WITH_ROCM, "varlen attention w/ sliding window not supported on ROCm"
+    )
     @parametrize("dtype", [torch.bfloat16, torch.float16])
     @parametrize("is_causal", [False, True])
     @parametrize("scale", [None, 0.1])
-    def test_varlen_vs_sdpa(self, device, dtype, is_causal, scale):
+    @parametrize("window_size", [(-1, -1), (-1, 0), (4, 0), (-1, 4)])
+    def test_varlen_vs_sdpa(self, device, dtype, is_causal, scale, window_size):
         torch.manual_seed(42)
 
         shape = VarlenShape(
@@ -358,12 +394,14 @@ class TestVarlenAttention(NNTestCase):
             variable_length_batch_data["max_len"],
             is_causal=is_causal,
             scale=scale,
+            window_size=window_size,
         )
         sdpa_output = attention_block.forward_sdpa(
             variable_length_batch_data["x_padded"],
             variable_length_batch_data["seq_lengths"],
             is_causal=is_causal,
             scale=scale,
+            window_size=window_size,
         )
 
         golden_sdpa_output = golden_attention_block.forward_sdpa(
@@ -371,6 +409,7 @@ class TestVarlenAttention(NNTestCase):
             golden_variable_length_batch_data["seq_lengths"],
             is_causal=is_causal,
             scale=scale,
+            window_size=window_size,
         )
 
         start_idx = 0
@@ -437,6 +476,7 @@ class TestVarlenAttention(NNTestCase):
             sdpa_grad_seq = sdpa_grad[i, :seq_len]
             golden_sdpa_seq = golden_sdpa_grad[i, :seq_len]
 
+            print(varlen_grad_seq, sdpa_grad_seq, golden_sdpa_seq)
             fwd_atol = (
                 2 * (golden_sdpa_seq + 0.3 - 0.3 - golden_sdpa_seq).abs().max().item()
             )
@@ -444,12 +484,19 @@ class TestVarlenAttention(NNTestCase):
             varlen_error = (varlen_grad_seq - fwd_atol).abs().max().item()
             sdpa_error = (sdpa_grad_seq - fwd_atol).abs().max().item()
 
+            print("errors")
+            print(varlen_error, sdpa_error)
+            print(abs(varlen_error - sdpa_error))
+
             self.assertLessEqual(varlen_error, sdpa_error + fwd_atol)
 
             start_idx = end_idx
 
     @unittest.skipIf(
         not PLATFORM_SUPPORTS_FLASH_ATTENTION, "Flash Attention not supported"
+    )
+    @unittest.skipIf(
+        TEST_WITH_ROCM, "varlen attention w/ sliding window not supported on ROCm"
     )
     @parametrize("dtype", [torch.bfloat16, torch.float16])
     @parametrize("is_causal", [False, True])
@@ -491,7 +538,7 @@ class TestVarlenAttention(NNTestCase):
             cu_seq_orig,
             max_seq_len,
             max_seq_len,
-            is_causal,
+            is_causal=is_causal,
         )
 
         original_grad_out = torch.randn_like(original_output)
@@ -525,7 +572,7 @@ class TestVarlenAttention(NNTestCase):
                 cu_seq_perm,
                 max_seq_len,
                 max_seq_len,
-                is_causal,
+                is_causal=is_causal,
             )
 
             for i in range(batch_size):
