@@ -68,23 +68,37 @@ if [[ ! -d "/usr/local/cuda" ]]; then
     ls -la /usr/local/cuda/include/cuda/std/utility || echo "WARNING: libcu++ headers not found"
 
     if [[ ! -f "/usr/local/cuda/include/cuda/std/utility" ]]; then
-        echo "libcu++ headers missing, downloading CCCL 12.6 package"
+        echo "libcu++ headers missing, downloading CCCL package..."
 
-        CCCL_VERSION="12.6.77"
-        CCCL_PKG="cuda_cccl-linux-sbsa-${CCCL_VERSION}-archive"
-        CCCL_URL="https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/linux-sbsa/${CCCL_PKG}.tar.xz"
-        echo "Downloading CCCL from: ${CCCL_URL}"
+        case "${CUDA_VERSION:-12.6}" in
+            12.6|12.6.*)
+                CCCL_VERSION="12.6.77"
+                ;;
+            13.0|13.0.*)
+                CCCL_VERSION="13.0.13"
+                ;;
+            *)
+                echo "Unknown CUDA version for CCCL: ${CUDA_VERSION}"
+                CCCL_VERSION=""
+                ;;
+        esac
 
-        CCCL_TMP=$(mktemp -d)
-        pushd "${CCCL_TMP}"
-        wget -q "${CCCL_URL}" -O cccl.tar.xz
-        tar xf cccl.tar.xz
-        cp -a "${CCCL_PKG}"/include/* /usr/local/cuda/include/
-        popd
-        rm -rf "${CCCL_TMP}"
+        if [[ -n "${CCCL_VERSION}" ]]; then
+            CCCL_PKG="cuda_cccl-linux-sbsa-${CCCL_VERSION}-archive"
+            CCCL_URL="https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/linux-sbsa/${CCCL_PKG}.tar.xz"
+            echo "Downloading CCCL ${CCCL_VERSION} from: ${CCCL_URL}"
 
-        echo "CCCL installed, verifying..."
-        ls -la /usr/local/cuda/include/cuda/std/utility
+            CCCL_TMP=$(mktemp -d)
+            pushd "${CCCL_TMP}"
+            wget -q "${CCCL_URL}" -O cccl.tar.xz
+            tar xf cccl.tar.xz
+            cp -a "${CCCL_PKG}"/include/* /usr/local/cuda/include/
+            popd
+            rm -rf "${CCCL_TMP}"
+
+            echo "CCCL installed, verifying..."
+            ls -la /usr/local/cuda/include/cuda/std/utility
+        fi
     fi
 
     echo "Installed CUDA version:"
@@ -130,10 +144,8 @@ pushd "$FLASH_ATTENTION_HOPPER_DIR"
 git config --global --add safe.directory '*'
 git submodule update --init ../csrc/cutlass
 
-if [[ "$(uname -m)" != "aarch64" ]]; then
-    sed -i 's/bare_metal_version != Version("12.8")/bare_metal_version < Version("12.8")/' \
-        "$FLASH_ATTENTION_HOPPER_DIR/setup.py"
-fi
+sed -i 's/bare_metal_version != Version("12.8")/bare_metal_version >= Version("12.3") and bare_metal_version < Version("13.0") and bare_metal_version != Version("12.8")/' \
+    "$FLASH_ATTENTION_HOPPER_DIR/setup.py"
 
 "$PYTHON" setup.py bdist_wheel \
     -d "$FA_FINAL_PACKAGE_DIR" \
